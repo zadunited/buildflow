@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BuildFlow — نظام إدارة المقاولات</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0D0F14; font-family: 'IBM Plex Sans Arabic', system-ui, sans-serif; color: #E8E8EE; }
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-thumb { background: #2A2C35; border-radius: 3px; }
+input, select, button, textarea { font-family: inherit; }
+.spin { animation: spin 1s linear infinite; display: inline-block; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const API = 'http://localhost:3000/api';
+
+// ── API Helper ───────────────────────────────────────
+const api = async (path, method = 'GET', body = null) => {
+  const token = localStorage.getItem('bf_token');
+  const res = await fetch(API + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    body: body ? JSON.stringify(body) : null,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'خطأ في الخادم');
+  return data;
+};
+
+const fmt = n => Number(n).toLocaleString('ar-KW') + ' د.ك';
+
+const ROLES = {
+  general_manager:  { label: 'المدير العام',       icon: '👑', color: '#FFD166' },
+  project_manager:  { label: 'مدير المشاريع',      icon: '🏗', color: '#3A8FC8' },
+  site_engineer:    { label: 'مهندس الموقع',       icon: '👷', color: '#3AC876' },
+  site_supervisor:  { label: 'مراقب الموقع',       icon: '📋', color: '#C8973A' },
+  technical_office: { label: 'المكتب الفني',       icon: '📐', color: '#9B3AC8' },
+  accountant:       { label: 'المحاسب',            icon: '💰', color: '#C83A6E' },
+  marketing:        { label: 'التسويق',            icon: '📣', color: '#FF6EC7' },
+  hr:               { label: 'الموارد البشرية',    icon: '👥', color: '#6EC6FF' },
+  representative:   { label: 'المندوب',            icon: '🏛', color: '#A8E6CF' },
+  client:           { label: 'العميل',             icon: '🏢', color: '#888' },
+};
+
+const ACCESS = {
+  dashboard:    ['general_manager','project_manager','site_engineer','site_supervisor','technical_office','accountant','marketing','hr','representative'],
+  projects:     ['general_manager','project_manager','site_engineer','site_supervisor','technical_office','accountant','representative'],
+  reports:      ['general_manager','project_manager','site_engineer','site_supervisor'],
+  checklists:   ['general_manager','project_manager','site_engineer'],
+  purchases:    ['general_manager','project_manager','site_engineer','site_supervisor'],
+  finance:      ['general_manager','accountant','project_manager'],
+  chat:         ['general_manager','project_manager','site_engineer','site_supervisor','technical_office','accountant','marketing','hr','representative'],
+  client_portal:['client'],
+  notifications:['general_manager','project_manager','site_engineer','site_supervisor','technical_office','accountant','marketing','hr','representative','client'],
+};
+const can = (role, mod) => ACCESS[mod]?.includes(role) ?? false;
+
+// ── UI Components ────────────────────────────────────
+const Badge = ({color, children, small}) => (
+  <span style={{fontSize:small?10:11,fontWeight:700,padding:small?'1px 6px':'3px 10px',borderRadius:20,background:color+'20',color,border:`1px solid ${color}35`,display:'inline-flex',alignItems:'center'}}>{children}</span>
+);
+
+const Btn = ({children,onClick,color='#C8973A',variant='fill',small,disabled,full,loading}) => (
+  <button onClick={onClick} disabled={disabled||loading} style={{width:full?'100%':undefined,padding:small?'6px 14px':'10px 20px',borderRadius:9,fontSize:small?11:13,fontWeight:700,background:variant==='fill'?`linear-gradient(135deg,${color},${color}CC)`:color+'18',color:variant==='fill'?'#0D0F14':color,border:variant==='outline'?`1px solid ${color}44`:'none',cursor:(disabled||loading)?'not-allowed':'pointer',opacity:(disabled||loading)?.6:1,transition:'all .15s'}}>
+    {loading ? <span className="spin">⟳</span> : children}
+  </button>
+);
+
+const Card = ({children,style,accent}) => (
+  <div style={{background:'#111318',borderRadius:12,border:`1px solid ${accent?accent+'40':'#1E2028'}`,...style}}>{children}</div>
+);
+
+const PBar = ({value,planned,h=6,color='#C8973A'}) => (
+  <div style={{position:'relative'}}>
+    <div style={{height:h,background:'#1A1C22',borderRadius:h,overflow:'hidden'}}>
+      <div style={{height:'100%',width:`${Math.min(value||0,100)}%`,background:color,borderRadius:h,transition:'width .4s'}}/>
+    </div>
+    {planned&&<div style={{position:'absolute',top:-2,left:`${planned}%`,width:2,height:h+4,background:'#FF6EC7',borderRadius:2}}/>}
+  </div>
+);
+
+const Loader = () => (
+  <div style={{display:'flex',alignItems:'center',justifyContent:'center',padding:60,color:'#555',fontSize:14}}>
+    <span className="spin" style={{marginLeft:10,fontSize:20}}>⟳</span> جاري التحميل...
+  </div>
+);
+
+const Err = ({msg, onRetry}) => (
+  <Card style={{padding:30,textAlign:'center'}}>
+    <div style={{fontSize:24,marginBottom:10}}>⚠️</div>
+    <div style={{color:'#C83A6E',fontSize:13,marginBottom:16}}>{msg}</div>
+    {onRetry && <Btn onClick={onRetry} small color='#C8973A'>إعادة المحاولة</Btn>}
+  </Card>
+);
+
+// ── LOGIN ────────────────────────────────────────────
+const Login = ({onLogin}) => {
+  const [email,setEmail]   = useState('');
+  const [pass,setPass]     = useState('');
+  const [err,setErr]       = useState('');
+  const [loading,setLoad]  = useState(false);
+  const [show,setShow]     = useState(false);
+
+  const QUICK = [
+    {label:'المدير العام',email:'gm@buildflow.kw',icon:'👑',color:'#FFD166'},
+    {label:'مدير المشاريع',email:'pm@buildflow.kw',icon:'🏗',color:'#3A8FC8'},
+    {label:'مهندس الموقع',email:'eng@buildflow.kw',icon:'👷',color:'#3AC876'},
+    {label:'مراقب الموقع',email:'sup@buildflow.kw',icon:'📋',color:'#C8973A'},
+    {label:'المحاسب',email:'acc@buildflow.kw',icon:'💰',color:'#C83A6E'},
+    {label:'العميل',email:'client@buildflow.kw',icon:'🏢',color:'#888'},
+  ];
+
+  const go = async (e='', p='1234') => {
+    const em = e || email;
+    const pw = p || pass;
+    if(!em) return setErr('أدخل البريد الإلكتروني');
+    setLoad(true); setErr('');
+    try {
+      const data = await api('/auth/login','POST',{email:em,password:pw});
+      localStorage.setItem('bf_token', data.token);
+      onLogin(data.user);
+    } catch(ex) {
+      setErr(ex.message);
+    } finally { setLoad(false); }
+  };
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{width:420}}>
+        <div style={{textAlign:'center',marginBottom:36}}>
+          <div style={{width:60,height:60,borderRadius:14,background:'linear-gradient(135deg,#C8973A,#E8B55A)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,fontWeight:700,color:'#0D0F14',margin:'0 auto 14px'}}>B</div>
+          <div style={{fontSize:26,fontWeight:700}}>BuildFlow</div>
+          <div style={{fontSize:12,color:'#555',marginTop:4}}>نظام إدارة شركة المقاولات — الكويت</div>
+        </div>
+        <Card style={{padding:32}}>
+          <div style={{marginBottom:18}}>
+            <label style={{fontSize:12,color:'#666',display:'block',marginBottom:8}}>البريد الإلكتروني</label>
+            <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="example@buildflow.kw" dir="ltr"
+              onKeyDown={e=>e.key==='Enter'&&go()}
+              style={{width:'100%',background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:9,padding:'11px 14px',color:'#E8E8EE',fontSize:13,outline:'none'}}/>
+          </div>
+          <div style={{marginBottom:24}}>
+            <label style={{fontSize:12,color:'#666',display:'block',marginBottom:8}}>كلمة المرور</label>
+            <input value={pass} onChange={e=>setPass(e.target.value)} type="password" placeholder="••••••••"
+              onKeyDown={e=>e.key==='Enter'&&go()}
+              style={{width:'100%',background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:9,padding:'11px 14px',color:'#E8E8EE',fontSize:13,outline:'none'}}/>
+          </div>
+          {err&&<div style={{color:'#C83A6E',fontSize:12,marginBottom:14,textAlign:'center'}}>{err}</div>}
+          <Btn onClick={()=>go()} full loading={loading}>دخول</Btn>
+        </Card>
+        <div style={{marginTop:20}}>
+          <div style={{textAlign:'center',color:'#444',fontSize:12,cursor:'pointer',marginBottom:10}} onClick={()=>setShow(!show)}>{show?'▲':'▼'} دخول سريع للتجربة — كلمة المرور: 1234</div>
+          {show&&(
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+              {QUICK.map(u=>(
+                <button key={u.email} onClick={()=>go(u.email,'1234')} style={{background:'#111318',border:'1px solid #1E2028',borderRadius:9,padding:'10px 12px',cursor:'pointer',display:'flex',alignItems:'center',gap:8,textAlign:'right'}}>
+                  <span style={{fontSize:18}}>{u.icon}</span>
+                  <div><div style={{fontSize:11,fontWeight:600,color:u.color}}>{u.label}</div><div style={{fontSize:10,color:'#555'}}>{u.email}</div></div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── SIDEBAR ──────────────────────────────────────────
+const Sidebar = ({user,active,setActive,notifCount,onLogout}) => {
+  const role = user.role;
+  const nav = [
+    {key:'dashboard',   icon:'📊',label:'الرئيسية'},
+    {key:'projects',    icon:'🏗', label:'المشاريع'},
+    {key:'reports',     icon:'📋', label:'التقارير اليومية'},
+    {key:'checklists',  icon:'✅', label:'الاستلامات'},
+    {key:'purchases',   icon:'🛒', label:'المشتريات'},
+    {key:'finance',     icon:'💰', label:'المالية'},
+    {key:'chat',        icon:'💬', label:'المحادثات'},
+    {key:'notifications',icon:'🔔',label:'التنبيهات'},
+    {key:'client_portal',icon:'🏢',label:'بوابة العميل'},
+  ].filter(i=>can(role,i.key));
+
+  return (
+    <div style={{width:210,background:'#0A0C10',borderLeft:'1px solid #1A1C22',display:'flex',flexDirection:'column',height:'100vh',position:'fixed',right:0,top:0,zIndex:10}}>
+      <div style={{padding:'18px 14px',borderBottom:'1px solid #1A1C22',display:'flex',alignItems:'center',gap:10}}>
+        <div style={{width:32,height:32,borderRadius:8,background:'linear-gradient(135deg,#C8973A,#E8B55A)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,fontWeight:700,color:'#0D0F14',flexShrink:0}}>B</div>
+        <div><div style={{fontSize:13,fontWeight:700}}>BuildFlow</div><div style={{fontSize:10,color:'#444'}}>نظام المقاولات</div></div>
+      </div>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid #1A1C22',display:'flex',alignItems:'center',gap:8}}>
+        <div style={{width:28,height:28,borderRadius:'50%',background:ROLES[role].color+'20',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,flexShrink:0}}>{ROLES[role].icon}</div>
+        <div><div style={{fontSize:11,fontWeight:600}}>{user.name}</div><div style={{fontSize:10,color:ROLES[role].color}}>{ROLES[role].label}</div></div>
+      </div>
+      <nav style={{flex:1,overflowY:'auto',padding:'8px'}}>
+        {nav.map(item=>(
+          <button key={item.key} onClick={()=>setActive(item.key)} style={{width:'100%',display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8,marginBottom:2,background:active===item.key?'#C8973A18':'transparent',border:active===item.key?'1px solid #C8973A30':'1px solid transparent',color:active===item.key?'#C8973A':'#666',cursor:'pointer',fontSize:12,fontWeight:600,textAlign:'right'}}>
+            <span style={{fontSize:16}}>{item.icon}</span>
+            <span style={{flex:1}}>{item.label}</span>
+            {item.key==='notifications'&&notifCount>0&&<span style={{width:18,height:18,borderRadius:'50%',background:'#C83A6E',fontSize:10,fontWeight:700,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{notifCount}</span>}
+          </button>
+        ))}
+      </nav>
+      <div style={{padding:'10px 8px',borderTop:'1px solid #1A1C22'}}>
+        <button onClick={onLogout} style={{width:'100%',padding:'9px',borderRadius:8,background:'transparent',border:'1px solid #1E2028',color:'#555',cursor:'pointer',fontSize:12}}>تسجيل الخروج ←</button>
+      </div>
+    </div>
+  );
+};
+
+// ── DASHBOARD ────────────────────────────────────────
+const Dashboard = ({user,projects,setActive,setProjId}) => {
+  const active = projects.filter(p=>p.status==='active');
+  const total  = active.reduce((a,p)=>a+Number(p.contract_value),0);
+  const avg    = active.length ? Math.round(active.reduce((a,p)=>a+Number(p.completion_pct),0)/active.length) : 0;
+  const alerts = projects.flatMap(p=>p.project_alerts||[]);
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:18}}>
+      <div style={{fontSize:16,fontWeight:700}}>مرحباً، {user.name} 👋</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12}}>
+        {[
+          {label:'مشاريع نشطة',   value:active.length,  color:'#3A8FC8',icon:'🏗'},
+          {label:'إجمالي العقود النشطة', value:fmt(total), color:'#3AC876',icon:'💰'},
+          {label:'متوسط الإنجاز', value:avg+'%',         color:'#C8973A',icon:'📈'},
+          {label:'تنبيهات اليوم', value:alerts.length,   color:'#C83A6E',icon:'🔔'},
+        ].map(k=>(
+          <Card key={k.label} style={{padding:'16px 18px'}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div><div style={{fontSize:11,color:'#666',marginBottom:8}}>{k.label}</div><div style={{fontSize:22,fontWeight:700,color:k.color}}>{k.value}</div></div>
+              <span style={{fontSize:24}}>{k.icon}</span>
+            </div>
+          </Card>
+        ))}
+      </div>
+      {projects.map(p=>(
+        <Card key={p.id} style={{padding:'18px 22px',cursor:'pointer'}} onClick={()=>{setProjId(p.id);setActive('projects');}}>
+          <div style={{display:'flex',gap:18,alignItems:'flex-start'}}>
+            <div style={{flex:2}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}><span style={{fontSize:14,fontWeight:700}}>{p.name}</span><Badge color='#3AC876'>نشط</Badge></div>
+              <div style={{fontSize:12,color:'#666',marginBottom:10}}>{p.client_name} · اليوم {p.day_number}/{p.total_days} · {p.current_phase}</div>
+              <PBar value={p.completion_pct} planned={p.planned_pct}/>
+              <div style={{display:'flex',justifyContent:'space-between',marginTop:4}}><span style={{fontSize:11,color:'#777'}}>الفعلي {p.completion_pct}%</span><span style={{fontSize:11,color:'#FF6EC7'}}>المخطط {p.planned_pct}%</span></div>
+            </div>
+            <div style={{flex:1}}>
+              {(p.project_alerts||[]).map((a,i)=><div key={i} style={{fontSize:11,color:'#888',marginBottom:5,display:'flex',gap:6}}><span>{a.icon}</span><span>{a.message}</span></div>)}
+            </div>
+            <div style={{background:'#0D0F14',borderRadius:10,padding:'12px 14px',textAlign:'center'}}>
+              <div style={{fontSize:11,color:'#555',marginBottom:4}}>قيمة العقد</div>
+              <div style={{fontSize:15,fontWeight:700,color:'#C8973A'}}>{fmt(p.contract_value)}</div>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+};
+
+// ── PROJECT DETAIL ────────────────────────────────────
+const ProjectDetail = ({projectId, user, onBack, onUpdate}) => {
+  const [proj,setProj]     = useState(null);
+  const [loading,setLoad]  = useState(true);
+  const [error,setError]   = useState('');
+  const [tab,setTab]       = useState('overview');
+  const [messages,setMsgs] = useState([]);
+  const [newMsg,setNM]     = useState('');
+  const [showPF,setSPF]    = useState(false);
+  const [np,setNP]         = useState({material:'اسمنت',quantity:'',unit:'كيس'});
+  const [saving,setSaving] = useState(false);
+
+  const load = async () => {
+    setLoad(true);
+    try {
+      const data = await api('/projects/'+projectId);
+      setProj(data);
+    } catch(e){ setError(e.message); }
+    finally { setLoad(false); }
+  };
+
+  const loadMsgs = async () => {
+    try {
+      const data = await api('/conversations/'+projectId+'/messages');
+      setMsgs(data);
+    } catch{}
+  };
+
+  useEffect(()=>{ load(); },[projectId]);
+  useEffect(()=>{ if(tab==='chat') loadMsgs(); },[tab]);
+
+  const sendMsg = async () => {
+    if(!newMsg.trim()) return;
+    try {
+      const msg = await api('/conversations/'+projectId+'/messages','POST',{content:newMsg});
+      setMsgs(prev=>[...prev,msg]); setNM('');
+    } catch{}
+  };
+
+  const toggleItem = async (clId, itemId, checked) => {
+    if(!['site_engineer','project_manager','general_manager'].includes(user.role)) return;
+    try {
+      await api('/checklists/items/'+itemId,'PUT',{is_checked:!checked});
+      await load();
+    } catch{}
+  };
+
+  const approveCL = async (clId) => {
+    setSaving(true);
+    try {
+      await api('/checklists/'+clId+'/approve','POST');
+      await load(); onUpdate();
+    } catch(e){ alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const approvePur = async (id) => {
+    if(!['project_manager','general_manager'].includes(user.role)) return;
+    try {
+      await api('/purchases/'+id+'/approve','PUT',{});
+      await load();
+    } catch(e){ alert(e.message); }
+  };
+
+  const submitPur = async () => {
+    if(!np.material||!np.quantity) return;
+    setSaving(true);
+    try {
+      await api('/purchases','POST',{...np,project_id:projectId,planned_quantity:np.quantity*2});
+      await load(); setSPF(false); setNP({material:'اسمنت',quantity:'',unit:'كيس'});
+    } catch(e){ alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  if(loading) return <Loader/>;
+  if(error)   return <Err msg={error} onRetry={load}/>;
+  if(!proj)   return null;
+
+  const openCL = (proj.checklists||[]).find(cl=>cl.status==='open');
+  const TABS=[{k:'overview',l:'نظرة عامة'},{k:'checklists',l:'✅ الاستلامات'},{k:'purchases',l:'🛒 المشتريات'},{k:'payments',l:'💰 الدفعات'},{k:'reports',l:'📋 التقارير'},{k:'chat',l:'💬 المحادثة'}];
+  const pSC={received:'#3AC876',due:'#C83A6E',upcoming:'#555',sent:'#9B3AC8'};
+  const pSL={received:'مستلم ✓',due:'مستحق الآن',upcoming:'قادم',sent:'أُرسل'};
+  const purSC={pending:'#C8973A',manager_approved:'#3A8FC8',purchasing:'#9B3AC8',delivered:'#3AC876',rejected:'#C83A6E'};
+  const purSL={pending:'بانتظار الاعتماد',manager_approved:'اعتمد المدير',purchasing:'قيد الشراء',delivered:'تم الاستلام',rejected:'مرفوض'};
+
+  return (
+    <div>
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:18}}>
+        <button onClick={onBack} style={{background:'#1A1C22',border:'none',borderRadius:8,padding:'6px 14px',color:'#888',cursor:'pointer',fontSize:12}}>← رجوع</button>
+        <div><div style={{fontSize:15,fontWeight:700}}>{proj.name}</div><div style={{fontSize:12,color:'#666'}}>{proj.client_name}</div></div>
+      </div>
+      <div style={{display:'flex',gap:4,borderBottom:'1px solid #1E2028',marginBottom:18,overflowX:'auto'}}>
+        {TABS.map(t=><button key={t.k} onClick={()=>setTab(t.k)} style={{padding:'9px 16px',background:'none',border:'none',borderBottom:`2px solid ${tab===t.k?'#C8973A':'transparent'}`,color:tab===t.k?'#C8973A':'#666',cursor:'pointer',fontSize:12,fontWeight:600,whiteSpace:'nowrap'}}>{t.l}</button>)}
+      </div>
+
+      {tab==='overview'&&(
+        <div style={{display:'flex',flexDirection:'column',gap:14}}>
+          <Card style={{padding:'18px 22px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
+              {[{label:'قيمة العقد',value:fmt(proj.contract_value),color:'#C8973A'},{label:'اليوم',value:`${proj.day_number}/${proj.total_days}`,color:'#E8E8EE'},{label:'المرحلة',value:proj.current_phase,color:'#3A8FC8'},{label:'مصاريف الموقع/شهر',value:fmt(proj.site_expenses_month),color:'#C83A6E'}].map(s=>(
+                <div key={s.label} style={{background:'#0D0F14',borderRadius:9,padding:'10px 12px'}}><div style={{fontSize:10,color:'#555',marginBottom:4}}>{s.label}</div><div style={{fontSize:12,fontWeight:700,color:s.color}}>{s.value}</div></div>
+              ))}
+            </div>
+            <PBar value={proj.completion_pct} planned={proj.planned_pct} h={8}/>
+            <div style={{display:'flex',justifyContent:'space-between',marginTop:5}}><span style={{fontSize:11,color:'#777'}}>الفعلي {proj.completion_pct}%</span><span style={{fontSize:11,color:'#FF6EC7'}}>المخطط {proj.planned_pct}%</span></div>
+          </Card>
+          {(proj.project_alerts||[]).map((a,i)=><div key={i} style={{padding:'10px 16px',background:a.type==='warning'?'#C8973A12':a.type==='success'?'#3AC87612':'#3A8FC812',border:`1px solid ${a.type==='warning'?'#C8973A35':a.type==='success'?'#3AC87635':'#3A8FC835'}`,borderRadius:10,display:'flex',gap:8,fontSize:13,color:'#AAA'}}><span>{a.icon}</span><span>{a.message}</span></div>)}
+        </div>
+      )}
+
+      {tab==='checklists'&&(
+        <div style={{display:'grid',gridTemplateColumns:'220px 1fr',gap:16}}>
+          <Card>
+            {(proj.checklists||[]).map((cl,i)=>(
+              <div key={cl.id} style={{padding:'11px 14px',borderBottom:i<proj.checklists.length-1?'1px solid #161820':'none',opacity:cl.status==='locked'?.4:1}}>
+                <div style={{display:'flex',alignItems:'center',gap:8}}>
+                  <div style={{width:22,height:22,borderRadius:'50%',background:cl.status==='completed'?'#3AC876':cl.status==='open'?'#C8973A20':'#1A1C22',border:cl.status==='open'?'2px solid #C8973A':'none',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:cl.status==='completed'?'#0D0F14':cl.status==='open'?'#C8973A':'#333',flexShrink:0}}>
+                    {cl.status==='completed'?'✓':cl.status==='locked'?'🔒':cl.sequence_order}
+                  </div>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:600,color:cl.status==='open'?'#C8973A':cl.status==='completed'?'#555':'#444'}}>{cl.phase}</div>
+                    {cl.status==='open'&&<div style={{fontSize:10,color:'#555'}}>{(cl.checklist_items||[]).filter(i=>i.is_checked).length}/{(cl.checklist_items||[]).length} بنود</div>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </Card>
+          <Card style={{padding:20}}>
+            {openCL?(
+              <div>
+                <div style={{fontWeight:700,fontSize:14,color:'#C8973A',marginBottom:14}}>{openCL.phase}</div>
+                <div style={{marginBottom:10,fontSize:12,color:'#666'}}>{(openCL.checklist_items||[]).filter(i=>i.is_checked).length}/{(openCL.checklist_items||[]).length} بنود مكتملة</div>
+                <PBar value={(openCL.checklist_items||[]).filter(i=>i.is_checked).length/Math.max((openCL.checklist_items||[]).length,1)*100} h={5}/>
+                <div style={{marginTop:14}}>
+                  {(openCL.checklist_items||[]).map((item,i)=>(
+                    <div key={item.id} onClick={()=>toggleItem(openCL.id,item.id,item.is_checked)} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 0',borderBottom:'1px solid #161820',cursor:'pointer'}}>
+                      <div style={{width:22,height:22,borderRadius:6,background:item.is_checked?'#3AC876':'#1A1C22',border:item.is_checked?'none':'2px solid #2A2C35',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,color:'#0D0F14',fontWeight:700,flexShrink:0}}>{item.is_checked?'✓':''}</div>
+                      <span style={{fontSize:13,color:item.is_checked?'#555':'#E8E8EE',textDecoration:item.is_checked?'line-through':'none'}}>{item.item_name}</span>
+                    </div>
+                  ))}
+                </div>
+                {can(user.role,'checklists')&&(
+                  <div style={{marginTop:16}}>
+                    {(openCL.checklist_items||[]).every(i=>i.is_checked)
+                      ?<Btn onClick={()=>approveCL(openCL.id)} color='#3AC876' loading={saving}>اعتماد الـ Checklist ← يفتح المرحلة التالية تلقائياً</Btn>
+                      :<div style={{fontSize:12,color:'#555',padding:'10px',background:'#1A1C22',borderRadius:8}}>⛔ {(openCL.checklist_items||[]).filter(i=>!i.is_checked).length} بنود لم تكتمل بعد</div>
+                    }
+                  </div>
+                )}
+              </div>
+            ):<div style={{color:'#3AC876',textAlign:'center',padding:40,fontSize:14}}>✓ كل الاستلامات مكتملة</div>}
+          </Card>
+        </div>
+      )}
+
+      {tab==='purchases'&&(
+        <div style={{display:'flex',flexDirection:'column',gap:14}}>
+          {can(user.role,'reports')&&<div style={{display:'flex',justifyContent:'flex-end'}}><Btn onClick={()=>setSPF(true)} small>+ طلب مواد جديد</Btn></div>}
+          {showPF&&(
+            <Card style={{padding:20}}>
+              <div style={{fontWeight:700,fontSize:13,marginBottom:14}}>طلب مواد جديد</div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12,marginBottom:14}}>
+                {[['المادة','material','select',['حديد تسليح 12mm','حديد تسليح 16mm','اسمنت','رمل ناعم','حصى','خشب شدة','بلوك']],['الكمية','quantity','number',null],['الوحدة','unit','select',['طن','كيس','م³','لوح','عدد']]].map(([label,key,type,opts])=>(
+                  <div key={key}>
+                    <label style={{fontSize:11,color:'#666',display:'block',marginBottom:6}}>{label}</label>
+                    {type==='select'
+                      ?<select value={np[key]} onChange={e=>setNP(p=>({...p,[key]:e.target.value}))} style={{width:'100%',background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'9px 12px',color:'#E8E8EE',fontSize:12}}>{opts.map(o=><option key={o}>{o}</option>)}</select>
+                      :<input type={type} value={np[key]} onChange={e=>setNP(p=>({...p,[key]:e.target.value}))} style={{width:'100%',background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'9px 12px',color:'#E8E8EE',fontSize:12}}/>
+                    }
+                  </div>
+                ))}
+              </div>
+              <div style={{display:'flex',gap:10}}><Btn onClick={submitPur} loading={saving}>إرسال الطلب</Btn><Btn onClick={()=>setSPF(false)} variant='outline' color='#C83A6E'>إلغاء</Btn></div>
+            </Card>
+          )}
+          <Card>
+            {(proj.purchase_requests||[]).length===0&&<div style={{padding:30,textAlign:'center',color:'#555',fontSize:13}}>لا توجد طلبات بعد</div>}
+            {(proj.purchase_requests||[]).map((p,i)=>(
+              <div key={p.id} style={{padding:'13px 18px',borderBottom:i<proj.purchase_requests.length-1?'1px solid #161820':'none',display:'flex',alignItems:'center',gap:14}}>
+                <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600}}>{p.material}</div><div style={{fontSize:11,color:'#555',marginTop:2}}>{p.quantity}/{p.planned_quantity} {p.unit} · {p.requested_at?.slice(0,10)}</div></div>
+                <Badge color={purSC[p.status]}>{purSL[p.status]}</Badge>
+                {p.status==='pending'&&can(user.role,'finance')&&<Btn onClick={()=>approvePur(p.id)} small color='#3AC876'>اعتماد</Btn>}
+              </div>
+            ))}
+          </Card>
+        </div>
+      )}
+
+      {tab==='payments'&&(
+        <Card>
+          {(proj.payments||[]).map((p,i)=>(
+            <div key={p.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'13px 20px',borderBottom:i<proj.payments.length-1?'1px solid #161820':'none',background:p.status==='due'?'#C83A6E06':'transparent'}}>
+              <div><div style={{fontSize:13,fontWeight:600}}>{p.trigger}</div><div style={{fontSize:11,color:'#555',marginTop:2}}>الاستحقاق: {p.due_date}</div></div>
+              <div style={{display:'flex',alignItems:'center',gap:12}}>
+                <span style={{fontSize:14,fontWeight:700,color:pSC[p.status]}}>{fmt(p.amount)}</span>
+                <Badge color={pSC[p.status]}>{pSL[p.status]}</Badge>
+              </div>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {tab==='reports'&&(
+        <Card>
+          {(proj.daily_reports||[]).length===0&&<div style={{padding:30,textAlign:'center',color:'#555',fontSize:13}}>لا توجد تقارير بعد</div>}
+          {(proj.daily_reports||[]).map((r,i)=>(
+            <div key={r.id} style={{padding:'13px 20px',borderBottom:i<proj.daily_reports.length-1?'1px solid #161820':'none'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div><div style={{fontSize:13,fontWeight:600}}>تقرير {r.report_date}</div><div style={{fontSize:11,color:'#555',marginTop:2}}>{r.current_phase} · {r.workers_count} عامل</div></div>
+                <Badge color={r.status==='submitted'?'#3AC876':'#C8973A'}>{r.status==='submitted'?'مرفوع ✓':'مسودة'}</Badge>
+              </div>
+              {r.notes&&<div style={{fontSize:12,color:'#777',marginTop:6}}>{r.notes}</div>}
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {tab==='chat'&&(
+        <Card style={{height:440,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+          <div style={{padding:'12px 18px',borderBottom:'1px solid #1E2028',fontSize:13,fontWeight:700}}>💬 محادثة الفريق — {proj.name}</div>
+          <div style={{flex:1,overflowY:'auto',padding:'14px 16px',display:'flex',flexDirection:'column',gap:10}}>
+            {messages.map(msg=>{
+              const mine=msg.sender_id===user.id;
+              return (
+                <div key={msg.id} style={{display:'flex',flexDirection:'column',alignItems:mine?'flex-end':'flex-start'}}>
+                  {!mine&&<div style={{fontSize:10,color:'#555',marginBottom:3}}>{msg.sender_name}</div>}
+                  <div style={{maxWidth:'70%',padding:'9px 13px',borderRadius:mine?'18px 18px 4px 18px':'18px 18px 18px 4px',background:mine?'linear-gradient(135deg,#C8973A,#E8B55A)':'#1A1C22',color:mine?'#0D0F14':'#E8E8EE',fontSize:13}}>{msg.content}</div>
+                  <div style={{fontSize:10,color:'#444',marginTop:2}}>{msg.created_at?.slice(11,16)}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{padding:'10px 14px',borderTop:'1px solid #1E2028',display:'flex',gap:10}}>
+            <input value={newMsg} onChange={e=>setNM(e.target.value)} onKeyDown={e=>e.key==='Enter'&&sendMsg()} placeholder='اكتب رسالة...' style={{flex:1,background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:24,padding:'9px 14px',color:'#E8E8EE',fontSize:13,outline:'none'}}/>
+            <button onClick={sendMsg} style={{width:38,height:38,borderRadius:'50%',background:'linear-gradient(135deg,#C8973A,#E8B55A)',border:'none',cursor:'pointer',fontSize:15}}>➤</button>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+// ── DAILY REPORT ─────────────────────────────────────
+const DailyReports = ({user,projects}) => {
+  const [step,setStep]   = useState(1);
+  const [selP,setSelP]   = useState(projects[0]?.id||'');
+  const [workers,setW]   = useState([{specialty:'حداد',item:'تسليح الأعمدة',count:6}]);
+  const [workDone,setWD] = useState([{item_name:'تسليح أعمدة الدور الأول',quantity:12,unit:'عمود'}]);
+  const [notes,setNotes] = useState('');
+  const [done,setDone]   = useState(false);
+  const [draft,setDraft] = useState(false);
+  const [saving,setSave] = useState(false);
+  const proj = projects.find(p=>p.id===selP);
+  const specialties=['حداد','نجار','عامل خرسانة','مساح','كهربائي','سباك'];
+  const workItems=['تسليح أعمدة الدور الأول','شدة خشبية','صب خرسانة','بناء بلوك','لياسة جدران'];
+
+  const submit = async (status) => {
+    setSave(true);
+    try {
+      await api('/projects/'+selP+'/reports','POST',{
+        workers: workers.map(w=>({specialty:w.specialty,work_item:w.item,count:w.count})),
+        work_items: workDone,
+        notes, status,
+      });
+      if(status==='submitted') setDone(true); else setDraft(true);
+    } catch(e){ alert(e.message); }
+    finally { setSave(false); }
+  };
+
+  if(done) return <Card style={{padding:40,textAlign:'center'}}><div style={{fontSize:36,marginBottom:12}}>✅</div><div style={{fontSize:16,fontWeight:700,color:'#3AC876',marginBottom:8}}>تم إرسال التقرير بنجاح</div><Btn onClick={()=>{setDone(false);setStep(1);}}>تقرير جديد</Btn></Card>;
+  if(draft) return <Card style={{padding:40,textAlign:'center'}}><div style={{fontSize:36,marginBottom:12}}>📝</div><div style={{fontSize:16,fontWeight:700,color:'#C8973A',marginBottom:8}}>حُفظت كمسودة</div><div style={{fontSize:12,color:'#666',marginBottom:16}}>تقدر ترجع وتكمل في أي وقت</div><Btn onClick={()=>setDraft(false)}>متابعة التقرير</Btn></Card>;
+
+  return (
+    <div style={{display:'grid',gridTemplateColumns:'190px 1fr',gap:18}}>
+      <div>
+        {['البيانات التلقائية','العمال','الأعمال المنجزة','التوقفات','الصور','الإرسال'].map((s,i)=>(
+          <div key={i} style={{display:'flex',gap:0}}>
+            <div style={{display:'flex',flexDirection:'column',alignItems:'center',width:34}}>
+              <div onClick={()=>setStep(i+1)} style={{width:26,height:26,borderRadius:'50%',background:step===i+1?'#C8973A':step>i+1?'#3AC876':'#1A1C22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:step>=i+1?'#0D0F14':'#444',cursor:'pointer'}}>{step>i+1?'✓':i+1}</div>
+              {i<5&&<div style={{width:2,height:26,background:'#1A1C22'}}/>}
+            </div>
+            <div onClick={()=>setStep(i+1)} style={{flex:1,padding:'4px 8px 14px',fontSize:11,color:step===i+1?'#C8973A':step>i+1?'#3AC876':'#555',fontWeight:step===i+1?700:400,cursor:'pointer'}}>{s}</div>
+          </div>
+        ))}
+      </div>
+      <Card style={{padding:22}}>
+        {step===1&&(
+          <div>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:16}}>البيانات التلقائية</div>
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:11,color:'#666',display:'block',marginBottom:6}}>المشروع</label>
+              <select value={selP} onChange={e=>setSelP(e.target.value)} style={{width:'100%',background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'9px 12px',color:'#E8E8EE',fontSize:12}}>
+                {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+              {[['التاريخ',new Date().toLocaleDateString('ar-KW')],['المرحلة الحالية',proj?.current_phase||'—'],['المراقب',user.name]].map(([l,v])=>(
+                <div key={l} style={{background:'#0D0F14',borderRadius:9,padding:'10px 12px'}}>
+                  <div style={{fontSize:10,color:'#555',marginBottom:3}}>{l}</div>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style={{fontSize:12,fontWeight:600}}>{v}</span><Badge color='#3AC876' small>تلقائي</Badge></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {step===2&&(
+          <div>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>العمال بالتخصص</div>
+            {workers.map((w,i)=>(
+              <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1.5fr 70px 28px',gap:8,marginBottom:8}}>
+                <select value={w.specialty} onChange={e=>setW(prev=>prev.map((ww,ii)=>ii===i?{...ww,specialty:e.target.value}:ww))} style={{background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'7px 10px',color:'#E8E8EE',fontSize:11}}>{specialties.map(s=><option key={s}>{s}</option>)}</select>
+                <select value={w.item} onChange={e=>setW(prev=>prev.map((ww,ii)=>ii===i?{...ww,item:e.target.value}:ww))} style={{background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'7px 10px',color:'#E8E8EE',fontSize:11}}>{workItems.map(s=><option key={s}>{s}</option>)}</select>
+                <input type='number' value={w.count} onChange={e=>setW(prev=>prev.map((ww,ii)=>ii===i?{...ww,count:+e.target.value}:ww))} style={{background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'7px 8px',color:'#3AC876',fontSize:13,fontWeight:700,textAlign:'center'}}/>
+                <button onClick={()=>setW(prev=>prev.filter((_,ii)=>ii!==i))} style={{background:'none',border:'none',color:'#C83A6E',cursor:'pointer',fontSize:16}}>✕</button>
+              </div>
+            ))}
+            <button onClick={()=>setW(prev=>[...prev,{specialty:'حداد',item:workItems[0],count:1}])} style={{background:'none',border:'none',color:'#3A8FC8',cursor:'pointer',fontSize:12,marginTop:4}}>+ إضافة صف</button>
+            <div style={{marginTop:12,padding:'9px 12px',background:'#C8973A12',borderRadius:9,fontSize:12,color:'#888'}}>إجمالي: <strong style={{color:'#C8973A'}}>{workers.reduce((a,w)=>a+w.count,0)} عامل</strong></div>
+          </div>
+        )}
+        {step===3&&(
+          <div>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>الأعمال المنجزة</div>
+            {workDone.map((w,i)=>(
+              <div key={i} style={{background:'#0D0F14',borderRadius:9,padding:'11px 14px',marginBottom:8,display:'flex',gap:10,alignItems:'center'}}>
+                <select value={w.item_name} onChange={e=>setWD(prev=>prev.map((ww,ii)=>ii===i?{...ww,item_name:e.target.value}:ww))} style={{flex:1,background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'7px 10px',color:'#E8E8EE',fontSize:11}}>{workItems.map(s=><option key={s}>{s}</option>)}</select>
+                <input type='number' value={w.quantity} onChange={e=>setWD(prev=>prev.map((ww,ii)=>ii===i?{...ww,quantity:+e.target.value}:ww))} style={{width:70,background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:8,padding:'7px 9px',color:'#C8973A',fontSize:13,fontWeight:700,textAlign:'center'}}/>
+                <span style={{fontSize:11,color:'#666'}}>{w.unit}</span>
+              </div>
+            ))}
+            <button onClick={()=>setWD(prev=>[...prev,{item_name:workItems[0],quantity:1,unit:'عدد'}])} style={{background:'none',border:'none',color:'#3A8FC8',cursor:'pointer',fontSize:12,marginTop:4}}>+ إضافة بند</button>
+          </div>
+        )}
+        {step===4&&(
+          <div>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>التوقفات</div>
+            <div style={{textAlign:'center',padding:'24px 0'}}><div style={{fontSize:30,marginBottom:8}}>✅</div><div style={{fontSize:14,fontWeight:600,color:'#3AC876'}}>لا توقفات اليوم</div></div>
+          </div>
+        )}
+        {step===5&&(
+          <div>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>الصور الإلزامية</div>
+            <div style={{fontSize:12,color:'#666',marginBottom:14}}>تُلتقط من التطبيق مباشرة — لا رفع من المعرض</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
+              {[1,2,3].map(n=><div key={n} style={{background:'#0D0F14',border:'1px solid #1E2028',borderRadius:10,aspectRatio:'4/3',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6}}><span style={{fontSize:22}}>📷</span><span style={{fontSize:11,color:'#3AC876'}}>صورة {n} ✓</span></div>)}
+            </div>
+          </div>
+        )}
+        {step===6&&(
+          <div>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:16}}>مراجعة وإرسال</div>
+            <div style={{marginBottom:14}}>
+              <label style={{fontSize:11,color:'#666',display:'block',marginBottom:6}}>ملاحظات إضافية</label>
+              <textarea value={notes} onChange={e=>setNotes(e.target.value)} placeholder='اكتب أي ملاحظات...' rows={3} style={{width:'100%',background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:9,padding:'10px 14px',color:'#E8E8EE',fontSize:13,outline:'none',resize:'none'}}/>
+            </div>
+            {[['المشروع',proj?.name],['العمال',workers.reduce((a,w)=>a+w.count,0)+' عامل'],['الأعمال المنجزة',workDone.length+' بنود'],['التوقفات','لا توقفات'],['الصور','3 صور']].map(([l,v])=>(
+              <div key={l} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 12px',background:'#0D0F14',borderRadius:9,marginBottom:8}}>
+                <div style={{display:'flex',alignItems:'center',gap:8}}><div style={{width:16,height:16,borderRadius:'50%',background:'#3AC876',display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,color:'#0D0F14',fontWeight:700}}>✓</div><span style={{fontSize:13}}>{l}</span></div>
+                <span style={{fontSize:12,color:'#666'}}>{v}</span>
+              </div>
+            ))}
+            <div style={{display:'flex',gap:10,marginTop:18}}>
+              <Btn onClick={()=>submit('submitted')} color='#3AC876' full loading={saving}>إرسال التقرير ✓</Btn>
+              <Btn onClick={()=>submit('draft')} variant='outline' color='#C8973A' loading={saving}>حفظ كمسودة</Btn>
+            </div>
+          </div>
+        )}
+        <div style={{display:'flex',justifyContent:'space-between',marginTop:20,paddingTop:14,borderTop:'1px solid #1E2028'}}>
+          <Btn onClick={()=>setStep(s=>Math.max(1,s-1))} variant='outline' color='#666' disabled={step===1} small>السابق</Btn>
+          <span style={{fontSize:11,color:'#444',alignSelf:'center'}}>{step}/6</span>
+          <Btn onClick={()=>setStep(s=>Math.min(6,s+1))} variant='outline' color='#C8973A' disabled={step===6} small>التالي</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+// ── FINANCE ──────────────────────────────────────────
+const Finance = ({projects}) => {
+  const all = projects.flatMap(p=>(p.payments||[]).map(pay=>({...pay,project:p.name})));
+  const received = all.filter(p=>p.status==='received').reduce((a,p)=>a+Number(p.amount),0);
+  const due      = all.filter(p=>p.status==='due').reduce((a,p)=>a+Number(p.amount),0);
+  const upcoming = all.filter(p=>p.status==='upcoming').reduce((a,p)=>a+Number(p.amount),0);
+  const pSC={received:'#3AC876',due:'#C83A6E',upcoming:'#555',sent:'#9B3AC8'};
+  const pSL={received:'مستلم ✓',due:'مستحق الآن',upcoming:'قادم',sent:'أُرسل'};
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:16}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12}}>
+        {[{label:'إجمالي العقود النشطة',value:fmt(projects.filter(p=>p.status==='active').reduce((a,p)=>a+Number(p.contract_value),0)),color:'#C8973A'},{label:'مستلم',value:fmt(received),color:'#3AC876'},{label:'مستحق الآن',value:fmt(due),color:'#C83A6E'},{label:'قادم',value:fmt(upcoming),color:'#555'}].map(s=>(
+          <Card key={s.label} style={{padding:'14px 16px'}}><div style={{fontSize:11,color:'#666',marginBottom:6}}>{s.label}</div><div style={{fontSize:18,fontWeight:700,color:s.color}}>{s.value}</div></Card>
+        ))}
+      </div>
+      <Card>
+        {all.map((p,i)=>(
+          <div key={p.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 18px',borderBottom:i<all.length-1?'1px solid #161820':'none',background:p.status==='due'?'#C83A6E06':'transparent'}}>
+            <div><div style={{fontSize:13,fontWeight:600}}>{p.trigger}</div><div style={{fontSize:11,color:'#555',marginTop:2}}>{p.project} · {p.due_date}</div></div>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <span style={{fontSize:14,fontWeight:700,color:pSC[p.status]}}>{fmt(p.amount)}</span>
+              <Badge color={pSC[p.status]}>{pSL[p.status]}</Badge>
+            </div>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+};
+
+// ── CHAT ─────────────────────────────────────────────
+const Chat = ({user,projects}) => {
+  const [active,setActive] = useState('general');
+  const [messages,setMsgs] = useState([]);
+  const [newMsg,setNM]     = useState('');
+  const [loading,setLoad]  = useState(false);
+
+  const convs = [
+    {key:'general',name:'المحادثة العامة',icon:'👥'},
+    ...projects.map(p=>({key:p.id,name:p.name.split('—')[0].trim(),icon:'🏗'})),
+  ];
+
+  const loadMsgs = async () => {
+    setLoad(true);
+    try {
+      const data = await api('/conversations/'+active+'/messages');
+      setMsgs(data);
+    } catch{}
+    finally { setLoad(false); }
+  };
+
+  useEffect(()=>{ loadMsgs(); },[active]);
+
+  const send = async () => {
+    if(!newMsg.trim()) return;
+    try {
+      const msg = await api('/conversations/'+active+'/messages','POST',{content:newMsg});
+      setMsgs(prev=>[...prev,msg]); setNM('');
+    } catch{}
+  };
+
+  return (
+    <div style={{display:'grid',gridTemplateColumns:'200px 1fr',gap:0,border:'1px solid #1E2028',borderRadius:14,overflow:'hidden',height:520}}>
+      <div style={{borderLeft:'1px solid #1E2028',display:'flex',flexDirection:'column',background:'#0A0C10'}}>
+        <div style={{padding:'12px 14px',borderBottom:'1px solid #1E2028',fontSize:12,fontWeight:700,color:'#666'}}>المحادثات</div>
+        {convs.map(c=>(
+          <div key={c.key} onClick={()=>setActive(c.key)} style={{padding:'12px 14px',borderBottom:'1px solid #161820',background:active===c.key?'#C8973A08':'transparent',cursor:'pointer',display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:16}}>{c.icon}</span>
+            <span style={{fontSize:12,fontWeight:600,color:active===c.key?'#C8973A':'#888'}}>{c.name}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{display:'flex',flexDirection:'column',background:'#111318'}}>
+        <div style={{padding:'12px 16px',borderBottom:'1px solid #1E2028',fontSize:13,fontWeight:700}}>💬 {convs.find(c=>c.key===active)?.name}</div>
+        <div style={{flex:1,overflowY:'auto',padding:'14px 16px',display:'flex',flexDirection:'column',gap:10}}>
+          {loading?<Loader/>:messages.map(msg=>{
+            const mine=msg.sender_id===user.id;
+            return (
+              <div key={msg.id} style={{display:'flex',flexDirection:'column',alignItems:mine?'flex-end':'flex-start'}}>
+                {!mine&&<div style={{fontSize:10,color:'#555',marginBottom:3}}>{msg.sender_name}</div>}
+                <div style={{maxWidth:'72%',padding:'9px 13px',borderRadius:mine?'18px 18px 4px 18px':'18px 18px 18px 4px',background:mine?'linear-gradient(135deg,#C8973A,#E8B55A)':'#1A1C22',color:mine?'#0D0F14':'#E8E8EE',fontSize:13}}>{msg.content}</div>
+                <div style={{fontSize:10,color:'#444',marginTop:2}}>{msg.created_at?.slice(11,16)}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{padding:'10px 14px',borderTop:'1px solid #1E2028',display:'flex',gap:10}}>
+          <input value={newMsg} onChange={e=>setNM(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder='اكتب رسالة...' style={{flex:1,background:'#1A1C22',border:'1px solid #2A2C35',borderRadius:24,padding:'9px 14px',color:'#E8E8EE',fontSize:13,outline:'none'}}/>
+          <button onClick={send} style={{width:38,height:38,borderRadius:'50%',background:'linear-gradient(135deg,#C8973A,#E8B55A)',border:'none',cursor:'pointer',fontSize:15}}>➤</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── CLIENT PORTAL ────────────────────────────────────
+const ClientPortal = ({user,projects}) => {
+  const proj = projects[0];
+  const [tab,setTab] = useState('progress');
+  if(!proj) return <Card style={{padding:30,textAlign:'center'}}><div style={{color:'#555'}}>لا توجد مشاريع</div></Card>;
+  const paid = (proj.payments||[]).filter(p=>p.status==='received').reduce((a,p)=>a+Number(p.amount),0);
+  const pSC={received:'#3AC876',due:'#C83A6E',upcoming:'#555'};
+  const pSL={received:'مدفوع ✓',due:'مستحق',upcoming:'قادم'};
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:16}}>
+      <div style={{padding:'10px 14px',background:'#3A8FC812',border:'1px solid #3A8FC830',borderRadius:9,fontSize:12,color:'#888'}}>🏢 بوابة العميل — {user.name} — يشوف مشروعه فقط</div>
+      <Card style={{padding:'18px 22px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14}}>
+          <div><div style={{fontSize:15,fontWeight:700}}>{proj.name}</div><div style={{fontSize:12,color:'#666',marginTop:2}}>اليوم {proj.day_number}/{proj.total_days} · {proj.current_phase}</div></div>
+          <div style={{textAlign:'center'}}><div style={{fontSize:28,fontWeight:700,color:'#C8973A'}}>{proj.completion_pct}%</div><div style={{fontSize:10,color:'#666'}}>نسبة الإنجاز</div></div>
+        </div>
+        <PBar value={proj.completion_pct} planned={proj.planned_pct} h={8}/>
+      </Card>
+      <div style={{display:'flex',gap:4,borderBottom:'1px solid #1E2028'}}>
+        {[{k:'progress',l:'التقدم'},{k:'payments',l:'الدفعات'}].map(t=><button key={t.k} onClick={()=>setTab(t.k)} style={{padding:'9px 16px',background:'none',border:'none',borderBottom:`2px solid ${tab===t.k?'#C8973A':'transparent'}`,color:tab===t.k?'#C8973A':'#666',cursor:'pointer',fontSize:12,fontWeight:600}}>{t.l}</button>)}
+      </div>
+      {tab==='progress'&&(
+        <Card style={{padding:'16px 20px'}}>
+          {(proj.checklists||[]).map((cl,i)=>(
+            <div key={cl.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 0',borderBottom:i<proj.checklists.length-1?'1px solid #161820':'none'}}>
+              <div style={{width:20,height:20,borderRadius:'50%',background:cl.status==='completed'?'#3AC876':cl.status==='open'?'#C8973A20':'#1A1C22',border:cl.status==='open'?'2px solid #C8973A':'none',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700,color:cl.status==='completed'?'#0D0F14':'#C8973A',flexShrink:0}}>{cl.status==='completed'?'✓':cl.sequence_order}</div>
+              <span style={{fontSize:12,color:cl.status==='completed'?'#555':cl.status==='open'?'#C8973A':'#444'}}>{cl.phase}</span>
+              {cl.status==='open'&&<Badge color='#C8973A' small>جاري</Badge>}
+            </div>
+          ))}
+        </Card>
+      )}
+      {tab==='payments'&&(
+        <div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
+            <Card style={{padding:'14px 18px'}}><div style={{fontSize:11,color:'#666',marginBottom:6}}>مدفوع</div><div style={{fontSize:18,fontWeight:700,color:'#3AC876'}}>{fmt(paid)}</div></Card>
+            <Card style={{padding:'14px 18px'}}><div style={{fontSize:11,color:'#666',marginBottom:6}}>إجمالي العقد</div><div style={{fontSize:18,fontWeight:700,color:'#C8973A'}}>{fmt(proj.contract_value)}</div></Card>
+          </div>
+          <Card>
+            {(proj.payments||[]).map((p,i)=>(
+              <div key={p.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 18px',borderBottom:i<proj.payments.length-1?'1px solid #161820':'none'}}>
+                <div><div style={{fontSize:13,fontWeight:600}}>{p.trigger}</div><div style={{fontSize:11,color:'#555',marginTop:1}}>{p.due_date}</div></div>
+                <div style={{display:'flex',alignItems:'center',gap:10}}><span style={{fontSize:13,fontWeight:700,color:pSC[p.status]}}>{fmt(p.amount)}</span><Badge color={pSC[p.status]}>{pSL[p.status]}</Badge></div>
+              </div>
+            ))}
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── MAIN APP ─────────────────────────────────────────
+const App = () => {
+  const [user,setUser]     = useState(null);
+  const [active,setActive] = useState('dashboard');
+  const [projId,setProjId] = useState(null);
+  const [projects,setProjs] = useState([]);
+  const [loading,setLoad]  = useState(false);
+
+  const loadProjects = async () => {
+    setLoad(true);
+    try {
+      const data = await api('/projects');
+      setProjs(data);
+    } catch{}
+    finally { setLoad(false); }
+  };
+
+  useEffect(()=>{ if(user) loadProjects(); },[user]);
+
+  // تحقق من التوكن المحفوظ
+  useEffect(()=>{
+    const token = localStorage.getItem('bf_token');
+    if(token) {
+      api('/auth/me').then(data=>setUser(data.user)).catch(()=>localStorage.removeItem('bf_token'));
+    }
+  },[]);
+
+  const login  = u => setUser(u);
+  const logout = () => { localStorage.removeItem('bf_token'); setUser(null); setActive('dashboard'); setProjId(null); };
+  const setAct = m => { setActive(m); setProjId(null); };
+
+  if(!user) return <Login onLogin={login}/>;
+
+  const notifCount = 3; // مؤقت
+
+  const renderModule = () => {
+    if(active==='projects'&&projId) return <ProjectDetail projectId={projId} user={user} onBack={()=>setProjId(null)} onUpdate={loadProjects}/>;
+    if(loading) return <Loader/>;
+    switch(active){
+      case 'dashboard':    return <Dashboard user={user} projects={projects} setActive={setAct} setProjId={setProjId}/>;
+      case 'projects':     return (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>المشاريع</div>
+          {projects.map(p=>(
+            <Card key={p.id} style={{padding:'16px 20px',cursor:'pointer'}} onClick={()=>{setProjId(p.id);}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><div><div style={{fontSize:14,fontWeight:700}}>{p.name}</div><div style={{fontSize:12,color:'#666',marginTop:2}}>{p.client_name}</div></div><Badge color='#3AC876'>نشط ←</Badge></div>
+              <PBar value={p.completion_pct} planned={p.planned_pct}/>
+              <div style={{display:'flex',justifyContent:'space-between',marginTop:4}}><span style={{fontSize:11,color:'#777'}}>الفعلي {p.completion_pct}%</span><span style={{fontSize:11,color:'#FF6EC7'}}>المخطط {p.planned_pct}%</span></div>
+            </Card>
+          ))}
+        </div>
+      );
+      case 'reports':      return <DailyReports user={user} projects={projects}/>;
+      case 'finance':      return <Finance projects={projects}/>;
+      case 'chat':         return <Chat user={user} projects={projects}/>;
+      case 'client_portal':return <ClientPortal user={user} projects={projects}/>;
+      case 'checklists':   return (
+        <div>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>Checklist الاستلامات</div>
+          {projects.map(p=>(
+            <Card key={p.id} style={{padding:'14px 18px',marginBottom:10,cursor:'pointer'}} onClick={()=>{setProjId(p.id);setActive('projects');}}>
+              <div style={{fontSize:13,fontWeight:600,marginBottom:8}}>{p.name}</div>
+              <div style={{display:'flex',gap:8}}>
+                <Badge color='#3AC876'>{(p.checklists||[]).filter(c=>c.status==='completed').length} مكتمل</Badge>
+                <Badge color='#C8973A'>{(p.checklists||[]).filter(c=>c.status==='open').length} مفتوح</Badge>
+                <Badge color='#555'>{(p.checklists||[]).filter(c=>c.status==='locked').length} مقفل</Badge>
+              </div>
+            </Card>
+          ))}
+        </div>
+      );
+      case 'purchases':    return (
+        <div>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>المشتريات</div>
+          {projects.map(p=>(
+            <div key={p.id} style={{marginBottom:18}}>
+              <div style={{fontSize:12,color:'#C8973A',fontWeight:700,marginBottom:8}}>{p.name}</div>
+              <Card>
+                {(p.purchase_requests||[]).length===0&&<div style={{padding:20,textAlign:'center',color:'#555',fontSize:12}}>لا توجد طلبات</div>}
+                {(p.purchase_requests||[]).map((pu,i)=>(
+                  <div key={pu.id} style={{display:'flex',alignItems:'center',gap:14,padding:'12px 18px',borderBottom:i<p.purchase_requests.length-1?'1px solid #161820':'none'}}>
+                    <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600}}>{pu.material}</div><div style={{fontSize:11,color:'#555',marginTop:1}}>{pu.quantity}/{pu.planned_quantity} {pu.unit}</div></div>
+                    <Badge color={pu.status==='delivered'?'#3AC876':pu.status==='pending'?'#C8973A':'#3A8FC8'}>{pu.status==='delivered'?'تم الاستلام':pu.status==='pending'?'بانتظار الاعتماد':'جاري'}</Badge>
+                  </div>
+                ))}
+              </Card>
+            </div>
+          ))}
+        </div>
+      );
+      case 'notifications': return (
+        <Card>
+          {[
+            {msg:'تقرير فيلا الأمير لم يُرفع — اليوم آخر موعد', time:'منذ ساعة', color:'#C8973A'},
+            {msg:'دفعة فيلا الأمير مستحقة — 42,750 د.ك', time:'منذ يومين', color:'#3A8FC8'},
+            {msg:'Checklist حديد المجمع مكتمل ✓', time:'منذ 3 ساعات', color:'#3AC876'},
+          ].map((n,i,arr)=>(
+            <div key={i} style={{display:'flex',gap:12,padding:'13px 18px',borderBottom:i<arr.length-1?'1px solid #161820':'none'}}>
+              <div style={{width:8,height:8,borderRadius:'50%',background:n.color,marginTop:5,flexShrink:0}}/>
+              <div style={{flex:1}}><div style={{fontSize:13}}>{n.msg}</div><div style={{fontSize:11,color:'#555',marginTop:2}}>{n.time}</div></div>
+            </div>
+          ))}
+        </Card>
+      );
+      default: return <Card style={{padding:40,textAlign:'center'}}><div style={{fontSize:30,marginBottom:12}}>🚧</div><div style={{fontSize:13,color:'#666'}}>هذا القسم قيد البناء</div></Card>;
+    }
+  };
+
+  return (
+    <div dir='rtl' style={{minHeight:'100vh'}}>
+      <Sidebar user={user} active={active} setActive={setAct} notifCount={notifCount} onLogout={logout}/>
+      <main style={{marginRight:210,padding:'24px 24px',minHeight:'100vh'}}>{renderModule()}</main>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
