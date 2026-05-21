@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const app = express();
 app.use(cors());
 app.use(express.json());
-
+app.use(express.static('.'));
 // Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
